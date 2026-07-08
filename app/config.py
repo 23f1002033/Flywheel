@@ -29,6 +29,10 @@ class Settings(BaseSettings):
     complexity_threshold: float = 2.0
     pin_sensitive_local: bool = True
 
+    # Memory + cost engine (M4)
+    db_url: str = "sqlite:///data/flywheel.db"
+    co2_grams_per_1k_cloud_tokens: float = 1.5   # rough industry estimate
+
 @lru_cache
 def get_settings() -> Settings:
     return Settings()
