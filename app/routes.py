@@ -1,7 +1,9 @@
 import logging
 import time
+from functools import lru_cache
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
+from app.agents.router import RouterAgent
 from app.providers.base import ProviderError
 from app.providers.registry import get_provider
 from app.schemas import (
@@ -13,20 +15,16 @@ log = logging.getLogger("flywheel.routes")
 router = APIRouter()
 
 
-def resolve_route(model: str) -> tuple[str, str]:
-    """Map requested model name to (route, reason).
-    M2: 'flywheel-auto' defaults to local. M3 replaces this with the router brain."""
-    if model == "flywheel-cloud":
-        return "cloud", "client forced cloud"
-    if model == "flywheel-local":
-        return "local", "client forced local"
-    return "local", "auto (M2 default: local; router brain lands in M3)"
+@lru_cache
+def get_router_agent() -> RouterAgent:
+    return RouterAgent()
 
 
 @router.post("/v1/chat/completions")
 async def chat_completions(req: ChatCompletionRequest):
-    route, reason = resolve_route(req.model)
-    provider = get_provider(route)
+    decision = get_router_agent().decide(req.model, req.messages)
+    log.info("route=%s | %s", decision.route, decision.reason)
+    provider = get_provider(decision.route)
     start = time.perf_counter()
 
     if req.stream:
@@ -50,5 +48,6 @@ async def chat_completions(req: ChatCompletionRequest):
         usage=Usage(prompt_tokens=result.prompt_tokens,
                     completion_tokens=result.completion_tokens,
                     total_tokens=result.prompt_tokens + result.completion_tokens),
-        flywheel=FlywheelMeta(route=route, reason=reason, latency_ms=latency_ms),
+        flywheel=FlywheelMeta(route=decision.route, reason=decision.reason,
+                              sensitive=decision.sensitive, latency_ms=latency_ms),
     )
