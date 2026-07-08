@@ -25,6 +25,9 @@ class Settings(BaseSettings):
     frontier_price_input: float = 5.00    
     frontier_price_output: float = 15.00
 
+    # Router Agent
+    complexity_threshold: float = 2.0
+    pin_sensitive_local: bool = True
 
 @lru_cache
 def get_settings() -> Settings:
