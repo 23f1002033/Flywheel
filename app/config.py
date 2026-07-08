@@ -15,7 +15,7 @@ class Settings(BaseSettings):
 
     fireworks_api_key: str = ""
     fireworks_base_url: str = "https://api.fireworks.ai/inference/v1"
-    fireworks_model: str = "accounts/fireworks/models/llama-v3p1-70b-instruct"
+    fireworks_model: str = "accounts/fireworks/models/glm-5p2"
 
     local_base_url: str = ""
     local_model: str = "google/gemma-2-2b-it"

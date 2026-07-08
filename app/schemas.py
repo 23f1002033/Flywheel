@@ -25,9 +25,13 @@ class Usage(BaseModel):
 
 
 class FlywheelMeta(BaseModel):
-    """Our extension block — route decision transparency for every response."""
-    route: Literal["local", "cloud", "stub"] = "stub"
+    """Our extension block - route decision transparency for every response."""
+    route: Literal["local", "cloud", "cache", "stub"] = "stub"
     reason: str = ""
+    sensitive: bool = False          
+    cached: bool = False
+    model_version: str = ""          
+    quality_score: float | None = None
     cost_usd: float = 0.0
     counterfactual_cost_usd: float = 0.0
     latency_ms: int = 0
