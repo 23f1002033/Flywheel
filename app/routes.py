@@ -1,11 +1,13 @@
 import logging
 import time
-from functools import lru_cache
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from app import costing
-from app.memory.store import MemoryStore
+from app.agents.cache import SemanticCache
+from app.agents.cost_guard import CostAgent
+from app.agents.memory_router import MemoryHint
 from app.agents.router import RouterAgent
+from app.memory.store import MemoryStore
 from app.providers.base import ProviderError
 from app.providers.registry import get_provider
 from app.schemas import (
@@ -17,19 +19,49 @@ log = logging.getLogger("flywheel.routes")
 router = APIRouter()
 
 _memory = MemoryStore()
+_cache = SemanticCache(_memory)
+_cost_agent = CostAgent(_memory)
+_router_agent = RouterAgent(memory_hint=MemoryHint(_memory),
+                            budget_pressure=_cost_agent.pressure)
 
 
-@lru_cache
-def get_router_agent() -> RouterAgent:
-    return RouterAgent()
+def _prompt_text(req: ChatCompletionRequest) -> str:
+    return " ".join(m.content for m in req.messages if m.role != "system")
 
 
 @router.post("/v1/chat/completions")
 async def chat_completions(req: ChatCompletionRequest):
-    decision = get_router_agent().decide(req.model, req.messages)
+    decision = _router_agent.decide(req.model, req.messages)
     log.info("route=%s | %s", decision.route, decision.reason)
-    provider = get_provider(decision.route)
+    prompt_text = _prompt_text(req)
     start = time.perf_counter()
+
+    if not req.stream and not decision.sensitive and req.model == "flywheel-auto":
+        hit = _cache.lookup(prompt_text)
+        if hit:
+            latency_ms = int((time.perf_counter() - start) * 1000)
+            est_tokens = len(hit["response"].split())
+            report = costing.compute("cache", len(prompt_text.split()), est_tokens)
+            _memory.log_request(
+                prompt=prompt_text, response=hit["response"], route="cache",
+                reason=f"semantic cache hit (sim={hit['similarity']})",
+                cached=True, model="flywheel-cache",
+                prompt_tokens=len(prompt_text.split()), completion_tokens=est_tokens,
+                latency_ms=latency_ms, cost_usd=0.0,
+                counterfactual_usd=report.counterfactual_usd,
+                saved_usd=report.counterfactual_usd,
+                co2_saved_grams=report.co2_saved_grams)
+            return ChatCompletionResponse(
+                model="flywheel-cache",
+                choices=[Choice(message=ChatMessage(role="assistant",
+                                                    content=hit["response"]))],
+                usage=Usage(),
+                flywheel=FlywheelMeta(route="cache", cached=True,
+                                      reason=f"semantic cache hit (sim={hit['similarity']})",
+                                      counterfactual_cost_usd=report.counterfactual_usd,
+                                      latency_ms=latency_ms))
+
+    provider = get_provider(decision.route)
 
     if req.stream:
         try:
@@ -47,22 +79,13 @@ async def chat_completions(req: ChatCompletionRequest):
     latency_ms = int((time.perf_counter() - start) * 1000)
     report = costing.compute(decision.route, result.prompt_tokens, result.completion_tokens)
 
-    prompt_text = " ".join(m.content for m in req.messages if m.role != "system")
     _memory.log_request(
-        prompt=prompt_text,
-        response=result.content,
-        route=decision.route,
-        reason=decision.reason,
-        sensitive=decision.sensitive,
-        model=result.model,
-        prompt_tokens=result.prompt_tokens,
-        completion_tokens=result.completion_tokens,
-        latency_ms=latency_ms,
-        cost_usd=report.cost_usd,
-        counterfactual_usd=report.counterfactual_usd,
-        saved_usd=report.saved_usd,
-        co2_saved_grams=report.co2_saved_grams,
-    )
+        prompt=prompt_text, response=result.content,
+        route=decision.route, reason=decision.reason, sensitive=decision.sensitive,
+        model=result.model, prompt_tokens=result.prompt_tokens,
+        completion_tokens=result.completion_tokens, latency_ms=latency_ms,
+        cost_usd=report.cost_usd, counterfactual_usd=report.counterfactual_usd,
+        saved_usd=report.saved_usd, co2_saved_grams=report.co2_saved_grams)
 
     return ChatCompletionResponse(
         model=result.model,
@@ -74,13 +97,12 @@ async def chat_completions(req: ChatCompletionRequest):
         flywheel=FlywheelMeta(route=decision.route, reason=decision.reason,
                               sensitive=decision.sensitive, latency_ms=latency_ms,
                               cost_usd=report.cost_usd,
-                              counterfactual_cost_usd=report.counterfactual_usd),
-    )
+                              counterfactual_cost_usd=report.counterfactual_usd))
 
 
 @router.get("/api/stats")
 async def api_stats():
-    return _memory.stats()
+    return {**_memory.stats(), "budget": _cost_agent.status()}
 
 
 @router.get("/api/requests/recent")
