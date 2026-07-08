@@ -33,6 +33,14 @@ class Settings(BaseSettings):
     db_url: str = "sqlite:///data/flywheel.db"
     co2_grams_per_1k_cloud_tokens: float = 1.5   # rough industry estimate
 
+    # Semantic cache + learning router + budget (M5)
+    cache_enabled: bool = True
+    cache_similarity_threshold: float = 0.95
+    memory_routing_enabled: bool = True
+    memory_k: int = 8
+    memory_min_samples: int = 4
+    monthly_budget_usd: float = 50.0
+
 @lru_cache
 def get_settings() -> Settings:
     return Settings()
