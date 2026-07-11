@@ -4,6 +4,7 @@ M7 adds evaluator feedback - both plug into this same class."""
 
 import logging
 import re
+from typing import Callable, Optional
 from dataclasses import dataclass, field
 from app.agents.safety import SafetyAgent, SafetyVerdict
 from app.config import get_settings
@@ -16,7 +17,8 @@ HARD_PATTERNS = [
     (re.compile(r"\b(prove|theorem|derivative|integral|complexity analysis)\b", re.I), 2.5, "math/proof"),
     (re.compile(r"\b(refactor|debug|implement|write a (function|class|program)|stack trace)\b", re.I), 2.0, "coding"),
     (re.compile(r"\b(step[- ]by[- ]step|chain of thought|reason (through|about)|multi[- ]step)\b", re.I), 1.5, "multi-step reasoning"),
-    (re.compile(r"\b(compare and contrast|trade[- ]?offs|pros and cons|architecture design)\b", re.I), 1.5, "analysis"),
+    (re.compile(r"\b(compare and contrast|trade[- ]?offs|pros and cons)\b", re.I), 1.5, "analysis"),
+    (re.compile(r"\b(architecture design|system design)\b", re.I), 1.0, "design"),
     (re.compile(r"\b(legal advice|medical advice|financial analysis)\b", re.I), 1.5, "expert domain"),
     (re.compile(r"```", re.M), 1.5, "code block present"),
 ]
@@ -39,9 +41,13 @@ class RouteDecision:
 
 
 class RouterAgent:
-    def __init__(self) -> None:
+    def __init__(self,
+                 memory_hint: Optional[Callable] = None,
+                 budget_pressure: Optional[Callable] = None) -> None:
         self.safety = SafetyAgent()
         self.settings = get_settings()
+        self.memory_hint = memory_hint
+        self.budget_pressure = budget_pressure
 
     def _complexity_score(self, text: str) -> tuple[float, list[str]]:
         score, hits = 0.0, []
@@ -75,7 +81,21 @@ class RouterAgent:
 
         # 3. complexity heuristics
         score, hits = self._complexity_score(text)
+        extra: list[str] = []
+        if self.memory_hint:
+            hint = self.memory_hint(text)
+            if hint:
+                delta, why = hint
+                score += delta
+                extra.append(why)
         threshold = self.settings.complexity_threshold
+        if self.budget_pressure:
+            bp = self.budget_pressure()
+            if bp:
+                t_delta, why = bp
+                threshold += t_delta
+                extra.append(why)
+        hits = hits + extra
         if score >= threshold:
             return RouteDecision(route="cloud", complexity=score,
                                  sensitive=verdict.sensitive, categories=verdict.categories,

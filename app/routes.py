@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import time
 from fastapi import APIRouter, HTTPException
@@ -14,6 +15,9 @@ from app.schemas import (
     ChatCompletionRequest, ChatCompletionResponse,
     ChatMessage, Choice, FlywheelMeta, Usage,
 )
+from app.agents.evaluator import EvaluatorAgent
+from app.agents.trainer import TrainerAgent
+from app.flywheel.dataset import build_dataset
 
 log = logging.getLogger("flywheel.routes")
 router = APIRouter()
@@ -24,10 +28,20 @@ _cost_agent = CostAgent(_memory)
 _router_agent = RouterAgent(memory_hint=MemoryHint(_memory),
                             budget_pressure=_cost_agent.pressure)
 
+_trainer = TrainerAgent()
+_evaluator = EvaluatorAgent(_memory)
 
 def _prompt_text(req: ChatCompletionRequest) -> str:
     return " ".join(m.content for m in req.messages if m.role != "system")
 
+@router.get("/api/flywheel/status")
+async def flywheel_status():
+    return _trainer.status()
+
+
+@router.post("/api/flywheel/build-dataset")
+async def flywheel_build_dataset():
+    return build_dataset()
 
 @router.post("/v1/chat/completions")
 async def chat_completions(req: ChatCompletionRequest):
@@ -79,13 +93,16 @@ async def chat_completions(req: ChatCompletionRequest):
     latency_ms = int((time.perf_counter() - start) * 1000)
     report = costing.compute(decision.route, result.prompt_tokens, result.completion_tokens)
 
-    _memory.log_request(
+    rid = _memory.log_request(
         prompt=prompt_text, response=result.content,
         route=decision.route, reason=decision.reason, sensitive=decision.sensitive,
         model=result.model, prompt_tokens=result.prompt_tokens,
         completion_tokens=result.completion_tokens, latency_ms=latency_ms,
         cost_usd=report.cost_usd, counterfactual_usd=report.counterfactual_usd,
         saved_usd=report.saved_usd, co2_saved_grams=report.co2_saved_grams)
+
+    if decision.route == "local" and not decision.sensitive and _evaluator.should_sample():
+        asyncio.create_task(_evaluator.judge(rid, prompt_text, result.content))
 
     return ChatCompletionResponse(
         model=result.model,
@@ -108,3 +125,7 @@ async def api_stats():
 @router.get("/api/requests/recent")
 async def api_recent(n: int = 50):
     return _memory.recent(min(n, 200))
+
+@router.get("/api/stats/timeline")
+async def api_timeline(days: int = 14):
+    return _memory.timeline(min(days, 90))

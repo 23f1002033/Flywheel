@@ -1,7 +1,7 @@
 import datetime
 import logging
 import numpy as np
-from sqlalchemy import func, select
+from sqlalchemy import case, func, select
 from app.memory.db import RequestLog, SessionLocal, init_db
 from app.memory import embeddings as emb
 
@@ -12,12 +12,36 @@ class MemoryStore:
     def __init__(self) -> None:
         init_db()
 
-    def log_request(self, **kw) -> None:
+    def log_request(self, **kw) -> int:
         text = kw.pop("prompt", "")
         record = RequestLog(prompt=text, embedding=emb.to_bytes(emb.embed(text)), **kw)
         with SessionLocal() as s:
             s.add(record)
             s.commit()
+            return record.id
+
+    def set_quality(self, request_id: int, score: float) -> None:
+        with SessionLocal() as s:
+            row = s.get(RequestLog, request_id)
+            if row:
+                row.quality_score = score
+                s.commit()
+
+    def timeline(self, days: int = 14) -> list[dict]:
+        cutoff = datetime.datetime.utcnow() - datetime.timedelta(days=days)
+        with SessionLocal() as s:
+            rows = s.execute(
+                select(func.date(RequestLog.created_at).label("day"),
+                       func.sum(RequestLog.saved_usd),
+                       func.sum(RequestLog.cost_usd),
+                       func.count(RequestLog.id),
+                       func.sum(case((RequestLog.route != "cloud", 1), else_=0)))
+                .where(RequestLog.created_at >= cutoff)
+                .group_by("day").order_by("day")).all()
+        return [{"day": str(d), "saved_usd": round(sv or 0, 6),
+                 "cost_usd": round(c or 0, 6), "requests": n,
+                 "local_ratio": round((loc or 0) / n, 4) if n else 0}
+                for d, sv, c, n, loc in rows]
 
     def similar(self, text: str, k: int = 8, scan: int = 500) -> list[dict]:
         """Nearest neighbors among the last `scan` records (brute force -
