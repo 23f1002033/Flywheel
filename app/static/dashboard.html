@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Flywheel</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+<style>
+  body{font-family:system-ui,sans-serif;background:#0f1115;color:#e6e6e6;margin:0;padding:24px}
+  h1{font-size:20px;margin:0 0 4px} .sub{color:#8a8f98;font-size:13px;margin-bottom:20px}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px;margin-bottom:20px}
+  .card{background:#171a21;border:1px solid #262b36;border-radius:10px;padding:16px}
+  .label{color:#8a8f98;font-size:12px;text-transform:uppercase;letter-spacing:.05em}
+  .big{font-size:26px;font-weight:600;margin-top:6px}
+  .green{color:#3ecf8e}.red{color:#ff6b6b}.blue{color:#5aa9ff}
+  .row{display:grid;grid-template-columns:2fr 1fr;gap:14px;margin-bottom:20px}
+  canvas{max-height:260px}
+  table{width:100%;border-collapse:collapse;font-size:12px}
+  td,th{padding:6px 8px;border-bottom:1px solid #262b36;text-align:left}
+  .pill{padding:2px 8px;border-radius:10px;font-size:11px}
+  .p-local{background:#123b2a;color:#3ecf8e}.p-cloud{background:#3b1a12;color:#ff9f6b}
+  .p-cache{background:#12253b;color:#5aa9ff}.p-stub{background:#2a2a2a;color:#999}
+  input[type=range]{width:100%}
+  .sim{font-size:13px;color:#c2c7d0;line-height:1.9}
+</style>
+</head>
+<body>
+<h1>Flywheel <span style="color:#3ecf8e">/</span> self-improving inference platform</h1>
+<div class="sub">Every request becomes training data. Every cycle keeps more inference local. Local tier: Gemma on AMD GPU.</div>
+
+<div class="grid">
+  <div class="card"><div class="label">Saved (vs frontier API)</div><div class="big green" id="saved">$0</div></div>
+  <div class="card"><div class="label">Actual spend</div><div class="big red" id="spend">$0</div></div>
+  <div class="card"><div class="label">Local + cache ratio</div><div class="big blue" id="ratio">0%</div></div>
+  <div class="card"><div class="label">Active model</div><div class="big" id="version">gemma-base</div></div>
+  <div class="card"><div class="label">CO2 saved</div><div class="big" id="co2">0 g</div></div>
+  <div class="card"><div class="label">Budget used</div><div class="big" id="budget">0%</div></div>
+</div>
+
+<div class="row">
+  <div class="card"><div class="label">Savings per day (USD)</div><canvas id="lineChart"></canvas></div>
+  <div class="card"><div class="label">Routing split</div><canvas id="pieChart"></canvas></div>
+</div>
+
+<div class="row">
+  <div class="card">
+    <div class="label">ROI simulator</div>
+    <div class="sim">
+      Monthly requests: <b id="simReqV">100000</b>
+      <input type="range" id="simReq" min="10000" max="2000000" step="10000" value="100000">
+      Local ratio target: <b id="simLocV">80%</b>
+      <input type="range" id="simLoc" min="10" max="99" step="1" value="80">
+      Avg tokens/request: <b id="simTokV">800</b>
+      <input type="range" id="simTok" min="100" max="4000" step="100" value="800">
+      <div id="simOut" style="margin-top:10px;font-size:15px"></div>
+    </div>
+  </div>
+  <div class="card"><div class="label">Model version timeline</div><div id="versions" style="font-size:13px;line-height:2"></div></div>
+</div>
+
+<div class="card"><div class="label">Live requests</div>
+  <table><thead><tr><th>time</th><th>route</th><th>reason</th><th>ms</th><th>saved</th><th>quality</th></tr></thead>
+  <tbody id="feed"></tbody></table>
+</div>
+
+<script>
+const $=id=>document.getElementById(id);
+const money=v=>'$'+(v<0.01&&v>0?v.toFixed(6):v.toFixed(2));
+let lineChart,pieChart;
+
+async function refresh(){
+  const stats=await (await fetch('/api/stats')).json();
+  $('saved').textContent=money(stats.total_saved_usd);
+  $('spend').textContent=money(stats.total_cost_usd);
+  $('ratio').textContent=Math.round(stats.local_ratio*100)+'%';
+  $('co2').textContent=stats.co2_saved_grams.toFixed(1)+' g';
+  const b=stats.budget||{};
+  $('budget').textContent=b.used_ratio!=null?Math.round(b.used_ratio*100)+'%':'-';
+
+  const tl=await (await fetch('/api/stats/timeline')).json();
+  const labels=tl.map(r=>r.day), saved=tl.map(r=>r.saved_usd);
+  if(!lineChart){lineChart=new Chart($('lineChart'),{type:'line',
+    data:{labels,datasets:[{data:saved,borderColor:'#3ecf8e',backgroundColor:'rgba(62,207,142,.15)',fill:true,tension:.3}]},
+    options:{plugins:{legend:{display:false}},scales:{x:{ticks:{color:'#8a8f98'}},y:{ticks:{color:'#8a8f98'}}}}});}
+  else{lineChart.data.labels=labels;lineChart.data.datasets[0].data=saved;lineChart.update('none');}
+
+  const br=stats.by_route||{};
+  const pd=[br.local||0,br.cloud||0,br.cache||0];
+  if(!pieChart){pieChart=new Chart($('pieChart'),{type:'doughnut',
+    data:{labels:['local (AMD GPU)','cloud','cache'],datasets:[{data:pd,
+      backgroundColor:['#3ecf8e','#ff9f6b','#5aa9ff'],borderWidth:0}]},
+    options:{plugins:{legend:{labels:{color:'#c2c7d0'}}}}});}
+  else{pieChart.data.datasets[0].data=pd;pieChart.update('none');}
+
+  const fw=await (await fetch('/api/flywheel/status')).json();
+  $('version').textContent=fw.active_version;
+  $('versions').innerHTML=(fw.versions.length?fw.versions:[{name:'gemma-base',status:'active',eval_score:null}])
+    .map(v=>`<div>${v.name} - <span class="pill p-${v.status==='active'?'local':(v.status==='candidate'?'cache':'cloud')}">${v.status}</span>`
+      +(v.eval_score!=null?` score ${v.eval_score.toFixed(2)}`:'')+'</div>').join('');
+
+  const recent=await (await fetch('/api/requests/recent?n=12')).json();
+  $('feed').innerHTML=recent.map(r=>`<tr>
+    <td>${r.created_at.slice(11,19)}</td>
+    <td><span class="pill p-${r.route}">${r.route}</span>${r.sensitive?' [PII]':''}</td>
+    <td>${(r.reason||'').slice(0,60)}</td><td>${r.latency_ms}</td>
+    <td class="green">${money(r.saved_usd||0)}</td>
+    <td>${r.quality_score!=null?r.quality_score.toFixed(2):'-'}</td></tr>`).join('');
+}
+
+function simulate(){
+  const req=+$('simReq').value, loc=+$('simLoc').value/100, tok=+$('simTok').value;
+  $('simReqV').textContent=req.toLocaleString();
+  $('simLocV').textContent=Math.round(loc*100)+'%';
+  $('simTokV').textContent=tok;
+  const frontier=req*tok/1e6*10;
+  const flywheel=req*(1-loc)*tok/1e6*0.9;
+  const gpu=1500;
+  const monthly=frontier-(flywheel+gpu);
+  const breakeven=monthly>0?Math.ceil(gpu/(frontier-flywheel)*30)+' days':'n/a';
+  $('simOut').innerHTML=`Frontier-only cost: <b class="red">${money(frontier)}/mo</b><br>`
+    +`With Flywheel: <b>${money(flywheel+gpu)}/mo</b> (incl. GPU)<br>`
+    +`Net savings: <b class="green">${money(Math.max(monthly,0))}/mo</b> - annual <b class="green">${money(Math.max(monthly*12,0))}</b><br>`
+    +`Break-even: <b>${breakeven}</b>`;
+}
+['simReq','simLoc','simTok'].forEach(id=>$(id).addEventListener('input',simulate));
+simulate(); refresh(); setInterval(refresh,3000);
+</script>
+</body>
+</html>

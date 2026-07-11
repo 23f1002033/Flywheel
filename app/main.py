@@ -1,5 +1,6 @@
 import logging
 from fastapi import FastAPI
+from fastapi.responses import FileResponse
 from app.config import get_settings
 from app.routes import router
 
@@ -16,6 +17,10 @@ def create_app() -> FastAPI:
         description="Self-improving hybrid inference gateway - local AMD GPU tier + cloud escalation.",
     )
     app.include_router(router)
+
+    @app.get("/dashboard")
+    async def dashboard():
+        return FileResponse("app/static/dashboard.html")
 
     @app.get("/health")
     async def health():
